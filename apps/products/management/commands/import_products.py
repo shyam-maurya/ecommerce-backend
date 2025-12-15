@@ -1,69 +1,47 @@
-from django.core.management.base import BaseCommand
-from openpyxl import load_workbook
+import openpyxl
+from django.core.management.base import BaseCommand, CommandError
 from apps.products.models import Product
+from decimal import Decimal
 from django.db import transaction
 
-
-class ProductService:
-    @staticmethod
-    def create_or_update(name, description, price, stock):
-        product, created = Product.objects.update_or_create(
-            name=name,
-            defaults={
-                "description": description,
-                "price": price,
-                "stock_quantity": stock
-            }
-        )
-        return created  # True = created, False = updated
-
+REQUIRED=['name','description','price','stock_quantity']
 
 class Command(BaseCommand):
-    help = "Import products from an Excel file"
+    help='Import products from Excel file'
 
     def add_arguments(self, parser):
-        parser.add_argument("file_path", type=str, help="Path to the Excel file")
+        parser.add_argument('file', type=str)
 
-    def handle(self, *args, **kwargs):
-        file_path = kwargs["file_path"]
-
+    def handle(self,*args,**opts):
+        path=opts['file']
         try:
-            wb = load_workbook(filename=file_path)
-            ws = wb.active
+            wb=openpyxl.load_workbook(path)
         except Exception as e:
-            self.stdout.write(self.style.ERROR(f"Error opening file: {e}"))
-            return
+            raise CommandError(e)
 
-        created = 0
-        updated = 0
-        failed = 0
+        ws=wb.active
+        headers=[(h or '').lower() for h in next(ws.iter_rows(min_row=1,max_row=1,values_only=True))]
+        if any(c not in headers for c in REQUIRED):
+            raise CommandError("Missing columns")
 
-        # Skip header row → start from row 2
+        idx={c:headers.index(c) for c in REQUIRED}
+        created=updated=failed=0
+
         for row in ws.iter_rows(min_row=2, values_only=True):
             try:
-                name, description, price, stock = row
-
-                if not name or price is None or stock is None:
-                    failed += 1
-                    continue
-
+                name=str(row[idx['name']]).strip()
+                desc=row[idx['description']] or ''
+                price=Decimal(str(row[idx['price']]))
+                stock=int(row[idx['stock_quantity']])
+                if price<=0 or stock<0: raise ValueError("Bad values")
                 with transaction.atomic():
-                    is_created = ProductService.create_or_update(
+                    obj,new=Product.objects.update_or_create(
                         name=name,
-                        description=description,
-                        price=price,
-                        stock=stock
+                        defaults={'description':desc,'price':price,'stock_quantity':stock}
                     )
-
-                if is_created:
-                    created += 1
-                else:
-                    updated += 1
-
+                created+=1 if new else updated+=1
             except Exception as e:
-                failed += 1
-                self.stdout.write(self.style.ERROR(f"Error processing row {row}: {e}"))
+                failed+=1
+                self.stderr.write(str(e))
 
-        self.stdout.write(self.style.SUCCESS(f"Products created: {created}"))
-        self.stdout.write(self.style.SUCCESS(f"Products updated: {updated}"))
-        self.stdout.write(self.style.WARNING(f"Products failed: {failed}"))
+        self.stdout.write(f"Created={created}, Updated={updated}, Failed={failed}")
